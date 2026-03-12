@@ -634,6 +634,216 @@ function Dashboard({ reports, profiles }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ALL REPORTS — detailed manager view
+// ══════════════════════════════════════════════════════════════════════════════
+function AllReportsView({ reports }) {
+  const [expanded, setExpanded] = useState({});
+  const [filterAgent, setFilterAgent] = useState("");
+  const [filterDate,  setFilterDate ] = useState("");
+  const [filterChan,  setFilterChan ] = useState("");
+
+  const toggle = id => setExpanded(p => ({ ...p, [id]: !p[id] }));
+
+  const agents = [...new Set(reports.map(r => r.agent_name))].sort();
+
+  const filtered = reports.filter(r =>
+    (!filterAgent || r.agent_name === filterAgent) &&
+    (!filterDate  || r.date === filterDate) &&
+    (!filterChan  || r.channel === filterChan)
+  ).sort((a,b) => b.date.localeCompare(a.date) || b.id - a.id);
+
+  const totalCalls = filtered.reduce((s,r)=>s+(r.calls_made||0),0);
+  const totalApps  = filtered.reduce((s,r)=>s+(r.applications_submitted||0),0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+
+      {/* Header + filters */}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
+        <div>
+          <div style={{ color: C.text, fontWeight: 800, fontSize: 18 }}>All Reports
+            <span style={{ color: C.muted, fontWeight: 400, fontSize: 13, marginLeft: 10 }}>{filtered.length} reports · 📞 {totalCalls} calls · 🎓 {totalApps} apps</span>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <select value={filterAgent} onChange={e => setFilterAgent(e.target.value)}
+            style={{ ...iCss, width: "auto", fontSize: 12, padding: "7px 12px" }}>
+            <option value="">All Team Members</option>
+            {agents.map(a => <option key={a}>{a}</option>)}
+          </select>
+          <select value={filterChan} onChange={e => setFilterChan(e.target.value)}
+            style={{ ...iCss, width: "auto", fontSize: 12, padding: "7px 12px" }}>
+            <option value="">All Channels</option>
+            <option>B2C</option><option>B2A</option>
+          </select>
+          <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)}
+            style={{ ...iCss, width: "auto", fontSize: 12, padding: "7px 12px" }} />
+          {(filterAgent||filterDate||filterChan) && (
+            <button onClick={() => { setFilterAgent(""); setFilterDate(""); setFilterChan(""); }}
+              style={{ background: C.redSoft, border: `1px solid ${C.red}33`, color: C.red, borderRadius: 8, padding: "7px 12px", fontSize: 12, cursor: "pointer", fontFamily: "inherit" }}>
+              Clear
+            </button>
+          )}
+        </div>
+      </div>
+
+      {filtered.length === 0 && (
+        <div style={{ textAlign: "center", color: C.muted, padding: "50px 0" }}>No reports match your filters.</div>
+      )}
+
+      {/* Report cards */}
+      {filtered.map(r => {
+        const apps = r.applications_submitted || 0;
+        const isOpen = expanded[r.id];
+        const qual = r.outcome_summary ? (r.outcome_summary.interested||0)+(r.outcome_summary.app_started||0)+(r.outcome_summary.app_submitted||0) : 0;
+        const callPct = r.leads_allocated > 0 ? Math.round((r.calls_made / r.leads_allocated) * 100) : 0;
+
+        return (
+          <div key={r.id} style={{ background: C.card, border: `1px solid ${isOpen ? C.gold+"44" : C.border}`, borderRadius: 16, overflow: "hidden", transition: "border-color 0.2s" }}>
+
+            {/* ── SUMMARY ROW (always visible) ── */}
+            <div
+              onClick={() => toggle(r.id)}
+              style={{ padding: "16px 20px", cursor: "pointer", display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}
+            >
+              {/* Avatar + name + date */}
+              <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 180 }}>
+                <Avatar name={r.agent_name} size={36} />
+                <div>
+                  <div style={{ color: C.text, fontWeight: 700, fontSize: 14 }}>{r.agent_name}</div>
+                  <div style={{ color: C.muted, fontSize: 11, marginTop: 1 }}>{fmtDate(r.date)}</div>
+                </div>
+              </div>
+
+              {/* Channel + source */}
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1 }}>
+                <span style={{ background: r.channel==="B2C"?C.tealSoft:C.goldSoft, color: r.channel==="B2C"?C.teal:C.gold, border: `1px solid ${r.channel==="B2C"?C.teal:C.gold}33`, borderRadius: 7, padding: "3px 10px", fontSize: 11, fontWeight: 700 }}>{r.channel}</span>
+                {r.lead_source && <span style={{ color: C.muted, fontSize: 12 }}>{r.lead_source}</span>}
+              </div>
+
+              {/* Stats pills */}
+              <div style={{ display: "flex", gap: 16, alignItems: "center", flexWrap: "wrap" }}>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: C.teal, fontWeight: 800, fontSize: 18 }}>{r.calls_made||0}<span style={{ color: C.faint, fontSize: 11, fontWeight: 400 }}>/{r.leads_allocated||20}</span></div>
+                  <div style={{ color: C.muted, fontSize: 9, letterSpacing: 0.8, textTransform: "uppercase" }}>Calls</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: r.hours_spent ? C.text : C.faint, fontWeight: 700, fontSize: 16 }}>{r.hours_spent||"—"}h</div>
+                  <div style={{ color: C.muted, fontSize: 9, letterSpacing: 0.8, textTransform: "uppercase" }}>Hours</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: apps>=1?C.gold:C.red, fontWeight: 800, fontSize: 18 }}>{apps}</div>
+                  <div style={{ color: C.muted, fontSize: 9, letterSpacing: 0.8, textTransform: "uppercase" }}>Apps</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ color: C.blue, fontWeight: 700, fontSize: 16 }}>{qual}</div>
+                  <div style={{ color: C.muted, fontSize: 9, letterSpacing: 0.8, textTransform: "uppercase" }}>Qualified</div>
+                </div>
+                <Tag label={apps>=1?"✓ Target Met":"✗ Below Target"} color={apps>=1?C.green:C.red} />
+              </div>
+
+              {/* Expand toggle */}
+              <div style={{ color: C.muted, fontSize: 18, marginLeft: "auto", userSelect: "none" }}>{isOpen ? "▲" : "▼"}</div>
+            </div>
+
+            {/* ── EXPANDED DETAIL ── */}
+            {isOpen && (
+              <div style={{ borderTop: `1px solid ${C.border}` }}>
+
+                {/* Call activity bar */}
+                <div style={{ padding: "16px 20px", borderBottom: `1px solid ${C.border}`, display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+                  <div>
+                    <div style={{ color: C.teal, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>📞 Call Activity</div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {[["Leads Allocated", r.leads_allocated||20, C.muted],["Calls Made", r.calls_made||0, C.teal],["Hours Spent", (r.hours_spent||"—")+"h", C.text]].map(([l,v,c]) => (
+                        <div key={l} style={{ display: "flex", justifyContent: "space-between", fontSize: 13 }}>
+                          <span style={{ color: C.muted }}>{l}</span>
+                          <span style={{ color: c, fontWeight: 700 }}>{v}</span>
+                        </div>
+                      ))}
+                      <div style={{ marginTop: 4 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: C.muted, marginBottom: 4 }}>
+                          <span>Call completion</span><span style={{ color: callPct>=90?C.green:callPct>=70?C.gold:C.red }}>{callPct}%</span>
+                        </div>
+                        <div style={{ height: 5, background: C.faint, borderRadius: 99, overflow: "hidden" }}>
+                          <div style={{ height: "100%", width: `${Math.min(callPct,100)}%`, background: callPct>=90?C.green:callPct>=70?C.gold:C.red, borderRadius: 99 }} />
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* University applications */}
+                  <div>
+                    <div style={{ color: C.green, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>🎓 Applications Submitted</div>
+                    {r.uni_apps && r.uni_apps.length > 0 ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        {r.uni_apps.map((u, i) => (
+                          <div key={i} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", background: C.greenSoft, border: `1px solid ${C.green}22`, borderRadius: 9, padding: "8px 12px" }}>
+                            <span style={{ color: C.text, fontSize: 12, fontWeight: 600 }}>{u.university}</span>
+                            <span style={{ background: C.green, color: "#fff", borderRadius: 99, width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 900, fontSize: 13 }}>{u.count}</span>
+                          </div>
+                        ))}
+                        <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, paddingTop: 4, borderTop: `1px solid ${C.border}` }}>
+                          <span style={{ color: C.muted }}>Total applications</span>
+                          <span style={{ color: C.gold, fontWeight: 800, fontSize: 14 }}>{apps}</span>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ color: C.muted, fontSize: 12 }}>No applications recorded</div>
+                    )}
+                  </div>
+
+                  {/* Call outcomes */}
+                  <div>
+                    <div style={{ color: C.gold, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 8, fontWeight: 700 }}>🎯 Call Outcomes</div>
+                    {r.outcome_summary && Object.values(r.outcome_summary).some(v=>v>0) ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                        {LEAD_OUTCOMES.filter(o => (r.outcome_summary[o.id]||0) > 0).map(o => (
+                          <div key={o.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                            <span style={{ color: o.color, fontSize: 12 }}>{o.icon} {o.label}</span>
+                            <span style={{ color: o.color, fontWeight: 800, fontSize: 13, minWidth: 20, textAlign: "right" }}>{r.outcome_summary[o.id]}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div style={{ color: C.muted, fontSize: 12 }}>No outcomes logged</div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Notes, blockers, follow-ups */}
+                {(r.notes || r.blockers || r.follow_ups) && (
+                  <div style={{ padding: "14px 20px", display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 16 }}>
+                    {r.blockers && (
+                      <div>
+                        <div style={{ color: C.red, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, fontWeight: 700 }}>⚠ Blockers</div>
+                        <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6, background: C.redSoft, border: `1px solid ${C.red}22`, borderRadius: 9, padding: "10px 12px" }}>{r.blockers}</div>
+                      </div>
+                    )}
+                    {r.follow_ups && (
+                      <div>
+                        <div style={{ color: C.gold, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, fontWeight: 700 }}>🔄 Follow-Ups</div>
+                        <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6, background: C.goldSoft, border: `1px solid ${C.gold}22`, borderRadius: 9, padding: "10px 12px" }}>{r.follow_ups}</div>
+                      </div>
+                    )}
+                    {r.notes && (
+                      <div>
+                        <div style={{ color: C.teal, fontSize: 10, letterSpacing: 1, textTransform: "uppercase", marginBottom: 6, fontWeight: 700 }}>📝 Notes</div>
+                        <div style={{ color: C.muted, fontSize: 13, lineHeight: 1.6, background: C.tealSoft, border: `1px solid ${C.teal}22`, borderRadius: 9, padding: "10px 12px" }}>{r.notes}</div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ROOT APP
 // ══════════════════════════════════════════════════════════════════════════════
 export default function App() {
@@ -830,29 +1040,7 @@ export default function App() {
           </div>
         )}
 
-        {tab === "log" && isManager && (
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div style={{ color: C.text, fontWeight: 700, fontSize: 16 }}>All Reports <span style={{ color: C.muted, fontWeight: 400, fontSize: 13 }}>({reports.length} total)</span></div>
-            {reports.map(r => {
-              const apps = r.applications_submitted||0;
-              return (
-                <div key={r.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: "12px 16px" }}>
-                  <div style={{ display: "grid", gridTemplateColumns: "170px 1fr 80px 80px 80px 100px", alignItems: "center", gap: 10 }}>
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <Avatar name={r.agent_name} size={28} />
-                      <span style={{ color: C.text, fontSize: 12.5, fontWeight: 600 }}>{r.agent_name}</span>
-                    </div>
-                    <div style={{ color: C.muted, fontSize: 12 }}>{fmtDate(r.date)} · <span style={{ color: r.channel==="B2C"?C.teal:C.gold }}>{r.channel}</span> · {r.lead_source||"—"}</div>
-                    <div style={{ color: C.teal, fontWeight: 700, fontSize: 13 }}>📞 {r.calls_made||0}</div>
-                    <div style={{ color: apps>=1?C.gold:C.red, fontWeight: 700, fontSize: 13 }}>🎓 {apps}</div>
-                    <div style={{ color: C.blue, fontSize: 12 }}>⭐ {r.outcome_summary ? (r.outcome_summary.interested||0)+(r.outcome_summary.app_started||0)+(r.outcome_summary.app_submitted||0) : 0}</div>
-                    <Tag label={apps>=1?"Target Met":"Below Target"} color={apps>=1?C.green:C.red} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+        {tab === "log" && isManager && <AllReportsView reports={reports} />}
       </div>
     </div>
   );
