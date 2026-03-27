@@ -634,6 +634,397 @@ function Dashboard({ reports, profiles }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// AUDIT VIEW — full individual team member performance report
+// ══════════════════════════════════════════════════════════════════════════════
+function AuditView({ reports, profiles }) {
+  const [selectedAgent, setSelectedAgent] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo,   setDateTo  ] = useState("");
+
+  const agents = [...new Set(reports.map(r => r.agent_name))].sort();
+  const profile = profiles.find(p => p.full_name === selectedAgent);
+
+  const agentReports = reports
+    .filter(r => r.agent_name === selectedAgent)
+    .filter(r => !dateFrom || r.date >= dateFrom)
+    .filter(r => !dateTo   || r.date <= dateTo)
+    .sort((a,b) => b.date.localeCompare(a.date));
+
+  // ── Aggregate stats ──────────────────────────────────────────────────────
+  const totalCalls  = agentReports.reduce((s,r)=>s+(r.calls_made||0),0);
+  const totalLeads  = agentReports.reduce((s,r)=>s+(r.leads_allocated||20),0);
+  const totalApps   = agentReports.reduce((s,r)=>s+(r.applications_submitted||0),0);
+  const totalHours  = agentReports.reduce((s,r)=>s+(parseFloat(r.hours_spent)||0),0);
+  const totalQual   = agentReports.reduce((s,r)=>{ const o=r.outcome_summary||{}; return s+(o.interested||0)+(o.app_started||0)+(o.app_submitted||0);},0);
+  const daysTarget  = agentReports.length;
+  const daysTargetMet = agentReports.filter(r=>(r.applications_submitted||0)>=1).length;
+  const callRate    = totalLeads>0 ? Math.round((totalCalls/totalLeads)*100) : 0;
+  const convRate    = totalCalls>0 ? ((totalApps/totalCalls)*100).toFixed(1) : "0.0";
+  const avgCallsDay = daysTarget>0 ? Math.round(totalCalls/daysTarget) : 0;
+  const avgAppsDay  = daysTarget>0 ? (totalApps/daysTarget).toFixed(1) : "0.0";
+  const avgHrsDay   = daysTarget>0 ? (totalHours/daysTarget).toFixed(1) : "0.0";
+
+  // KPI score
+  const appPct = daysTarget>0 ? Math.round((totalApps/daysTarget)*100) : 0;
+  const kpiScore = Math.round(callRate*0.4 + Math.min(appPct,140)*0.6);
+
+  // University breakdown across all reports
+  const uniTotals = {};
+  agentReports.forEach(r => {
+    (r.uni_apps||[]).forEach(u => {
+      if (u.university) uniTotals[u.university] = (uniTotals[u.university]||0)+(parseInt(u.count)||0);
+    });
+  });
+  const uniSorted = Object.entries(uniTotals).sort((a,b)=>b[1]-a[1]);
+
+  // Outcome totals
+  const outTotals = {};
+  LEAD_OUTCOMES.forEach(o => { outTotals[o.id] = agentReports.reduce((s,r)=>s+(r.outcome_summary?.[o.id]||0),0); });
+
+  // Channel split
+  const b2cDays = agentReports.filter(r=>r.channel==="B2C").length;
+  const b2aDays = agentReports.filter(r=>r.channel==="B2A").length;
+
+  // Trend chart data — last 10 reports reversed to chronological
+  const trendData = [...agentReports].reverse().slice(-10).map(r => ({
+    day: fmtDate(r.date).slice(0,5),
+    calls: r.calls_made||0,
+    apps: r.applications_submitted||0,
+    target: 1,
+  }));
+
+  const StatBox = ({label, value, sub, color, big}) => (
+    <div style={{ background: C.surface, border:`1px solid ${color}22`, borderRadius:14, padding:"16px 18px", position:"relative", overflow:"hidden" }}>
+      <div style={{ position:"absolute", top:0, left:0, right:0, height:3, background:color }} />
+      <div style={{ color:C.muted, fontSize:10, letterSpacing:1.1, textTransform:"uppercase", marginBottom:6 }}>{label}</div>
+      <div style={{ color, fontWeight:900, fontSize: big?32:24, lineHeight:1 }}>{value}</div>
+      {sub && <div style={{ color:C.muted, fontSize:11, marginTop:5 }}>{sub}</div>}
+    </div>
+  );
+
+  // ── SELECTION SCREEN ─────────────────────────────────────────────────────
+  if (!selectedAgent) return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div>
+        <div style={{ fontSize:20, fontWeight:900, color:C.text, marginBottom:4 }}>🔍 Team Member Audit</div>
+        <div style={{ color:C.muted, fontSize:13 }}>Select a team member to view their full performance report and audit their activity.</div>
+      </div>
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(auto-fill, minmax(260px,1fr))", gap:14 }}>
+        {agents.length === 0 && <div style={{ color:C.muted, fontSize:13 }}>No reports submitted yet.</div>}
+        {agents.map(name => {
+          const ar = reports.filter(r=>r.agent_name===name);
+          const calls = ar.reduce((s,r)=>s+(r.calls_made||0),0);
+          const apps  = ar.reduce((s,r)=>s+(r.applications_submitted||0),0);
+          const days  = ar.length;
+          const kpi   = days>0 ? Math.round((Math.round((calls/(days*20))*100))*0.4 + Math.min(Math.round((apps/days)*100),140)*0.6) : 0;
+          return (
+            <div key={name} onClick={()=>setSelectedAgent(name)}
+              style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:20, cursor:"pointer", transition:"all 0.18s" }}
+              onMouseEnter={e=>e.currentTarget.style.borderColor=C.gold+"66"}
+              onMouseLeave={e=>e.currentTarget.style.borderColor=C.border}
+            >
+              <div style={{ display:"flex", alignItems:"center", gap:12, marginBottom:14 }}>
+                <Avatar name={name} size={44} />
+                <div>
+                  <div style={{ color:C.text, fontWeight:800, fontSize:15 }}>{name}</div>
+                  <div style={{ color:C.muted, fontSize:11, marginTop:2 }}>{days} reports submitted</div>
+                </div>
+              </div>
+              <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8, marginBottom:14 }}>
+                {[["Calls",calls,C.teal],["Apps",apps,C.gold],["KPI",kpi,kpi>=80?C.green:kpi>=60?C.gold:C.red]].map(([l,v,c])=>(
+                  <div key={l} style={{ textAlign:"center", background:C.surface, borderRadius:9, padding:"8px 4px" }}>
+                    <div style={{ color:c, fontWeight:900, fontSize:18 }}>{v}</div>
+                    <div style={{ color:C.muted, fontSize:9, letterSpacing:0.8, textTransform:"uppercase" }}>{l}</div>
+                  </div>
+                ))}
+              </div>
+              <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                <div style={{ height:5, flex:1, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:`${Math.min(kpi,100)}%`, background:kpi>=80?C.green:kpi>=60?C.gold:C.red, borderRadius:99 }} />
+                </div>
+                <Tag label={kpi>=80?"Exceeding":kpi>=60?"On Track":"Below Target"} color={kpi>=80?C.green:kpi>=60?C.gold:C.red} />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  // ── FULL AUDIT REPORT ────────────────────────────────────────────────────
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* Back + header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:14 }}>
+          <button onClick={()=>{ setSelectedAgent(""); setDateFrom(""); setDateTo(""); }}
+            style={{ background:C.surface, border:`1px solid ${C.border}`, color:C.muted, borderRadius:9, padding:"8px 14px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+            ← Back
+          </button>
+          <Avatar name={selectedAgent} size={48} />
+          <div>
+            <div style={{ color:C.text, fontWeight:900, fontSize:20 }}>{selectedAgent}</div>
+            <div style={{ color:C.muted, fontSize:12 }}>{agentReports.length} reports · Full Performance Audit</div>
+          </div>
+        </div>
+        {/* Date range filter */}
+        <div style={{ display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
+          <span style={{ color:C.muted, fontSize:12 }}>Period:</span>
+          <input type="date" value={dateFrom} onChange={e=>setDateFrom(e.target.value)} style={{ ...iCss, width:"auto", fontSize:12, padding:"7px 12px" }} />
+          <span style={{ color:C.muted, fontSize:12 }}>to</span>
+          <input type="date" value={dateTo} onChange={e=>setDateTo(e.target.value)} style={{ ...iCss, width:"auto", fontSize:12, padding:"7px 12px" }} />
+          {(dateFrom||dateTo) && <button onClick={()=>{ setDateFrom(""); setDateTo(""); }}
+            style={{ background:C.redSoft, border:`1px solid ${C.red}33`, color:C.red, borderRadius:8, padding:"7px 12px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Clear</button>}
+        </div>
+      </div>
+
+      {agentReports.length === 0 && (
+        <div style={{ textAlign:"center", color:C.muted, padding:"50px 0", fontSize:14 }}>No reports found for this period.</div>
+      )}
+
+      {agentReports.length > 0 && <>
+
+        {/* ── KPI SCORE BANNER ── */}
+        <div style={{ background:`linear-gradient(135deg, ${kpiScore>=80?C.green:kpiScore>=60?C.gold:C.red}22, transparent)`, border:`1px solid ${kpiScore>=80?C.green:kpiScore>=60?C.gold:C.red}44`, borderRadius:16, padding:"20px 24px", display:"flex", alignItems:"center", gap:20, flexWrap:"wrap" }}>
+          <div style={{ textAlign:"center" }}>
+            <div style={{ color:kpiScore>=80?C.green:kpiScore>=60?C.gold:C.red, fontWeight:900, fontSize:52, lineHeight:1 }}>{kpiScore}</div>
+            <div style={{ color:C.muted, fontSize:11, letterSpacing:1, textTransform:"uppercase", marginTop:4 }}>KPI Score</div>
+          </div>
+          <div style={{ flex:1, minWidth:200 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", marginBottom:6 }}>
+              <span style={{ color:C.muted, fontSize:12 }}>Overall Performance</span>
+              <Tag label={kpiScore>=80?"Exceeding Target":kpiScore>=60?"On Track":"Below Target"} color={kpiScore>=80?C.green:kpiScore>=60?C.gold:C.red} />
+            </div>
+            <div style={{ height:10, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+              <div style={{ height:"100%", width:`${Math.min(kpiScore,100)}%`, background:kpiScore>=80?C.green:kpiScore>=60?C.gold:C.red, borderRadius:99, transition:"width 1s ease" }} />
+            </div>
+            <div style={{ display:"flex", gap:16, marginTop:10, flexWrap:"wrap" }}>
+              {[["Call Rate",`${callRate}%`,"40% weight",C.teal],["App Rate",`${appPct}%`,"60% weight",C.gold],["Days Reported",daysTarget,"total days",C.blue],["Target Days Met",daysTargetMet,`of ${daysTarget} days`,daysTargetMet===daysTarget?C.green:C.red]].map(([l,v,sub,c])=>(
+                <div key={l}>
+                  <div style={{ color:c, fontWeight:800, fontSize:15 }}>{v}</div>
+                  <div style={{ color:C.muted, fontSize:10 }}>{l}</div>
+                  <div style={{ color:C.faint, fontSize:10 }}>{sub}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── STAT GRID ── */}
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12 }}>
+          <StatBox label="Total Calls Made" value={totalCalls} sub={`Avg ${avgCallsDay}/day · ${callRate}% of leads`} color={C.teal} />
+          <StatBox label="Applications Submitted" value={totalApps} sub={`Avg ${avgAppsDay}/day`} color={C.gold} big />
+          <StatBox label="Hours Worked" value={`${totalHours.toFixed(1)}h`} sub={`Avg ${avgHrsDay}h/day`} color={C.blue} />
+          <StatBox label="Qualified Leads" value={totalQual} sub="Interested + Started + Submitted" color={C.purple} />
+        </div>
+
+        {/* ── UNIVERSITY BREAKDOWN + CHANNEL ── */}
+        <div style={{ display:"grid", gridTemplateColumns:"2fr 1fr", gap:16 }}>
+
+          {/* University breakdown */}
+          <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:22 }}>
+            <div style={{ color:C.green, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:16 }}>🎓 Applications by University — All Time</div>
+            {uniSorted.length === 0 ? (
+              <div style={{ color:C.muted, fontSize:13 }}>No applications recorded.</div>
+            ) : (
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {uniSorted.map(([uni, count]) => {
+                  const pct = totalApps>0 ? Math.round((count/totalApps)*100) : 0;
+                  return (
+                    <div key={uni}>
+                      <div style={{ display:"flex", justifyContent:"space-between", marginBottom:5 }}>
+                        <span style={{ color:C.text, fontSize:13, fontWeight:600 }}>{uni}</span>
+                        <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+                          <span style={{ color:C.muted, fontSize:11 }}>{pct}%</span>
+                          <span style={{ color:C.gold, fontWeight:900, fontSize:16, minWidth:24, textAlign:"right" }}>{count}</span>
+                        </div>
+                      </div>
+                      <div style={{ height:7, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+                        <div style={{ height:"100%", width:`${pct}%`, background:`linear-gradient(90deg,${C.green},${C.gold})`, borderRadius:99 }} />
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ borderTop:`1px solid ${C.border}`, paddingTop:12, marginTop:4, display:"flex", justifyContent:"space-between" }}>
+                  <span style={{ color:C.muted, fontSize:13, fontWeight:600 }}>Total Applications</span>
+                  <span style={{ color:C.gold, fontWeight:900, fontSize:20 }}>{totalApps}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Channel + outcome summary */}
+          <div style={{ display:"flex", flexDirection:"column", gap:14 }}>
+            <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:18 }}>
+              <div style={{ color:C.teal, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:12 }}>Channel Split</div>
+              {[["B2C",b2cDays,C.teal],["B2A",b2aDays,C.gold]].map(([ch,days,c])=>{
+                const pct = daysTarget>0?Math.round((days/daysTarget)*100):0;
+                return (
+                  <div key={ch} style={{ marginBottom:10 }}>
+                    <div style={{ display:"flex", justifyContent:"space-between", marginBottom:4 }}>
+                      <span style={{ color:c, fontWeight:700, fontSize:13 }}>{ch}</span>
+                      <span style={{ color:C.muted, fontSize:12 }}>{days} days · {pct}%</span>
+                    </div>
+                    <div style={{ height:6, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+                      <div style={{ height:"100%", width:`${pct}%`, background:c, borderRadius:99 }} />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:18, flex:1 }}>
+              <div style={{ color:C.gold, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:12 }}>Top Call Outcomes</div>
+              {LEAD_OUTCOMES.filter(o=>outTotals[o.id]>0).sort((a,b)=>outTotals[b.id]-outTotals[a.id]).slice(0,6).map(o=>(
+                <div key={o.id} style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:8 }}>
+                  <span style={{ color:o.color, fontSize:12 }}>{o.icon} {o.label}</span>
+                  <span style={{ color:o.color, fontWeight:800, fontSize:14 }}>{outTotals[o.id]}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {/* ── TREND CHART ── */}
+        {trendData.length > 1 && (
+          <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:22 }}>
+            <div style={{ color:C.text, fontWeight:700, fontSize:13, marginBottom:16 }}>📈 Performance Trend — Last {trendData.length} Reports</div>
+            <ResponsiveContainer width="100%" height={180}>
+              <BarChart data={trendData} barGap={4}>
+                <CartesianGrid strokeDasharray="3 3" stroke={C.faint} vertical={false} />
+                <XAxis dataKey="day" tick={{ fill:C.muted, fontSize:10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fill:C.muted, fontSize:10 }} axisLine={false} tickLine={false} />
+                <Tooltip contentStyle={{ background:C.surface, border:`1px solid ${C.border}`, borderRadius:10, color:C.text, fontSize:12 }} />
+                <Bar dataKey="calls" name="Calls" fill={C.teal} radius={[4,4,0,0]} opacity={0.8} />
+                <Bar dataKey="apps" name="Applications" fill={C.gold} radius={[4,4,0,0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        )}
+
+        {/* ── DAILY REPORT LOG ── */}
+        <div>
+          <div style={{ color:C.text, fontWeight:800, fontSize:16, marginBottom:14 }}>📋 Daily Report Log — {agentReports.length} Entries</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:12 }}>
+            {agentReports.map((r,idx) => {
+              const apps = r.applications_submitted||0;
+              const callPct = r.leads_allocated>0?Math.round((r.calls_made/r.leads_allocated)*100):0;
+              return (
+                <div key={r.id} style={{ background:C.card, border:`1px solid ${apps>=1?C.green+"33":C.border}`, borderRadius:14, overflow:"hidden" }}>
+
+                  {/* Day header */}
+                  <div style={{ background:apps>=1?C.greenSoft:"transparent", padding:"13px 18px", display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:10 }}>
+                    <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+                      <div style={{ width:32, height:32, borderRadius:99, background:C.surface, border:`1px solid ${C.border}`, display:"flex", alignItems:"center", justifyContent:"center", color:C.muted, fontWeight:800, fontSize:12 }}>
+                        {agentReports.length - idx}
+                      </div>
+                      <div>
+                        <div style={{ color:C.text, fontWeight:800, fontSize:14 }}>{fmtDate(r.date)}</div>
+                        <div style={{ color:C.muted, fontSize:11, marginTop:2 }}>
+                          <span style={{ color:r.channel==="B2C"?C.teal:C.gold, fontWeight:700 }}>{r.channel}</span>
+                          {r.lead_source && <span> · {r.lead_source}</span>}
+                          {r.submitted_at && <span> · Submitted {new Date(r.submitted_at).toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}</span>}
+                        </div>
+                      </div>
+                    </div>
+                    <Tag label={apps>=1?"✓ Daily Target Met":"✗ Target Missed"} color={apps>=1?C.green:C.red} />
+                  </div>
+
+                  {/* Stats row */}
+                  <div style={{ padding:"14px 18px", display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:12, borderBottom:`1px solid ${C.border}` }}>
+                    {/* Calls */}
+                    <div style={{ background:C.surface, borderRadius:11, padding:"12px 14px" }}>
+                      <div style={{ color:C.muted, fontSize:10, letterSpacing:0.8, textTransform:"uppercase", marginBottom:6 }}>📞 Calls</div>
+                      <div style={{ color:C.teal, fontWeight:900, fontSize:22 }}>{r.calls_made||0}<span style={{ color:C.faint, fontSize:13, fontWeight:400 }}>/{r.leads_allocated||20}</span></div>
+                      <div style={{ marginTop:6 }}>
+                        <div style={{ display:"flex", justifyContent:"space-between", fontSize:10, color:C.muted, marginBottom:3 }}>
+                          <span>Completion</span><span style={{ color:callPct>=90?C.green:callPct>=70?C.gold:C.red }}>{callPct}%</span>
+                        </div>
+                        <div style={{ height:4, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+                          <div style={{ height:"100%", width:`${Math.min(callPct,100)}%`, background:callPct>=90?C.green:callPct>=70?C.gold:C.red, borderRadius:99 }} />
+                        </div>
+                      </div>
+                    </div>
+                    {/* Hours */}
+                    <div style={{ background:C.surface, borderRadius:11, padding:"12px 14px" }}>
+                      <div style={{ color:C.muted, fontSize:10, letterSpacing:0.8, textTransform:"uppercase", marginBottom:6 }}>⏱ Hours</div>
+                      <div style={{ color:parseFloat(r.hours_spent)>=4?C.green:C.text, fontWeight:900, fontSize:22 }}>{r.hours_spent||"—"}<span style={{ color:C.faint, fontSize:13, fontWeight:400 }}>h</span></div>
+                      <div style={{ color:C.muted, fontSize:10, marginTop:6 }}>Target: 4h minimum</div>
+                    </div>
+                    {/* Applications */}
+                    <div style={{ background:C.surface, borderRadius:11, padding:"12px 14px" }}>
+                      <div style={{ color:C.muted, fontSize:10, letterSpacing:0.8, textTransform:"uppercase", marginBottom:6 }}>🎓 Applications</div>
+                      <div style={{ color:apps>=1?C.gold:C.red, fontWeight:900, fontSize:22 }}>{apps}</div>
+                      <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:6 }}>
+                        {(r.uni_apps||[]).filter(u=>u.university).map((u,i)=>(
+                          <div key={i} style={{ display:"flex", justifyContent:"space-between", fontSize:10 }}>
+                            <span style={{ color:C.muted }}>{u.university.replace("University of ","Uni of ").replace("University","Uni")}</span>
+                            <span style={{ color:C.gold, fontWeight:700 }}>{u.count}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                    {/* Qualified */}
+                    <div style={{ background:C.surface, borderRadius:11, padding:"12px 14px" }}>
+                      <div style={{ color:C.muted, fontSize:10, letterSpacing:0.8, textTransform:"uppercase", marginBottom:6 }}>⭐ Qualified</div>
+                      <div style={{ color:C.blue, fontWeight:900, fontSize:22 }}>
+                        {r.outcome_summary?((r.outcome_summary.interested||0)+(r.outcome_summary.app_started||0)+(r.outcome_summary.app_submitted||0)):0}
+                      </div>
+                      <div style={{ color:C.muted, fontSize:10, marginTop:6 }}>Interested + Started + Submitted</div>
+                    </div>
+                  </div>
+
+                  {/* Outcomes + notes */}
+                  <div style={{ padding:"14px 18px", display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
+                    {/* Call outcomes */}
+                    {r.outcome_summary && Object.values(r.outcome_summary).some(v=>v>0) && (
+                      <div>
+                        <div style={{ color:C.gold, fontSize:10, letterSpacing:1, textTransform:"uppercase", marginBottom:8, fontWeight:700 }}>🎯 Call Outcomes</div>
+                        <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+                          {LEAD_OUTCOMES.filter(o=>(r.outcome_summary[o.id]||0)>0).map(o=>(
+                            <span key={o.id} style={{ background:o.color+"18", color:o.color, border:`1px solid ${o.color}33`, borderRadius:7, padding:"4px 10px", fontSize:11, fontWeight:700 }}>
+                              {o.icon} {o.label} · {r.outcome_summary[o.id]}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {/* Notes, blockers, follow-ups */}
+                    <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+                      {r.blockers && (
+                        <div style={{ background:C.redSoft, border:`1px solid ${C.red}22`, borderRadius:9, padding:"9px 12px" }}>
+                          <div style={{ color:C.red, fontSize:10, fontWeight:700, letterSpacing:0.8, textTransform:"uppercase", marginBottom:3 }}>⚠ Blockers</div>
+                          <div style={{ color:C.muted, fontSize:12, lineHeight:1.6 }}>{r.blockers}</div>
+                        </div>
+                      )}
+                      {r.follow_ups && (
+                        <div style={{ background:C.goldSoft, border:`1px solid ${C.gold}22`, borderRadius:9, padding:"9px 12px" }}>
+                          <div style={{ color:C.gold, fontSize:10, fontWeight:700, letterSpacing:0.8, textTransform:"uppercase", marginBottom:3 }}>🔄 Follow-Ups</div>
+                          <div style={{ color:C.muted, fontSize:12, lineHeight:1.6 }}>{r.follow_ups}</div>
+                        </div>
+                      )}
+                      {r.notes && (
+                        <div style={{ background:C.tealSoft, border:`1px solid ${C.teal}22`, borderRadius:9, padding:"9px 12px" }}>
+                          <div style={{ color:C.teal, fontSize:10, fontWeight:700, letterSpacing:0.8, textTransform:"uppercase", marginBottom:3 }}>📝 Notes</div>
+                          <div style={{ color:C.muted, fontSize:12, lineHeight:1.6 }}>{r.notes}</div>
+                        </div>
+                      )}
+                      {!r.blockers && !r.follow_ups && !r.notes && (
+                        <div style={{ color:C.faint, fontSize:12, fontStyle:"italic" }}>No notes or blockers recorded.</div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </>}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ALL REPORTS — detailed manager view
 // ══════════════════════════════════════════════════════════════════════════════
 function AllReportsView({ reports }) {
@@ -909,6 +1300,7 @@ export default function App() {
     ...(isManager ? [{ id: "dashboard", label: "KPI Dashboard", icon: "📊" }] : []),
     { id: "entry", label: "Submit Daily Report", icon: "✍️" },
     ...(isManager ? [{ id: "log", label: "All Reports", icon: "📋" }] : []),
+    ...(isManager ? [{ id: "audit", label: "Team Member Audit", icon: "🔍" }] : []),
     { id: "myreports", label: "My Reports", icon: "👤" },
   ];
 
@@ -1041,6 +1433,8 @@ export default function App() {
         )}
 
         {tab === "log" && isManager && <AllReportsView reports={reports} />}
+
+        {tab === "audit" && isManager && <AuditView reports={reports} profiles={profiles} />}
       </div>
     </div>
   );
