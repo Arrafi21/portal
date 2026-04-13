@@ -24,7 +24,7 @@ const C = {
 const AVATAR_COLORS = [C.teal, C.gold, C.purple, C.blue, C.green, "#FF8A65", "#EC407A", "#26C6DA"];
 
 // ─── CONSTANTS ────────────────────────────────────────────────────────────────
-const LEAD_SOURCES = ["Facebook Ads","Instagram Ads","TikTok Ads","Google Ads","Agent Referral","Student Referral","Old Students","Walk-In","Other"];
+const LEAD_SOURCES = ["Facebook Ads","Instagram Ads","TikTok Ads","Google Ads","Agent Referral","Student Referral","Old Students","Walk-In","XELM","Phoenix Leads","Other"];
 const UNIVERSITIES = ["University of Sunderland","University of Wolverhampton","ARU London","London Metropolitan University","Arden University","University of Wales Trinity Saint David","University of the West of Scotland","London School of Commerce","BPP University","LCCA","Other"];
 const LEAD_OUTCOMES = [
   { id: "no_answer",    label: "No Answer",          icon: "📵", color: "#6B82A0" },
@@ -1025,6 +1025,481 @@ function AuditView({ reports, profiles }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// CROSSCHECK VIEW — upload CSV from university admin, match against reports
+// ══════════════════════════════════════════════════════════════════════════════
+function CrosscheckView({ reports, profiles }) {
+  const [csvRows,      setCsvRows     ] = useState([]);   // parsed CSV data
+  const [csvHeaders,   setCsvHeaders  ] = useState([]);   // CSV column names
+  const [colName,      setColName     ] = useState("");   // which CSV col = student name
+  const [colUni,       setColUni      ] = useState("");   // which CSV col = university
+  const [colDate,      setColDate     ] = useState("");   // which CSV col = date (optional)
+  const [colStatus,    setColStatus   ] = useState("");   // which CSV col = status (optional)
+  const [filterAgent,  setFilterAgent ] = useState("");
+  const [filterUni,    setFilterUni   ] = useState("");
+  const [filterResult, setFilterResult] = useState("");   // matched | unmatched | disputed
+  const [notes,        setNotes       ] = useState({});   // auditor notes per row
+  const [verdicts,     setVerdicts    ] = useState({});   // confirmed | disputed | pending
+  const [step,         setStep        ] = useState(1);    // 1=upload 2=map 3=review
+  const [fileName,     setFileName    ] = useState("");
+  const fileRef = useRef(null);
+
+  // ── Parse CSV ──────────────────────────────────────────────────────────────
+  const parseCSV = (text) => {
+    const lines = text.trim().split(/\r?\n/);
+    if (lines.length < 2) return { headers: [], rows: [] };
+    const headers = lines[0].split(",").map(h => h.replace(/"/g,"").trim());
+    const rows = lines.slice(1).map((line, i) => {
+      const vals = line.match(/(".*?"|[^,]+|(?<=,)(?=,)|(?<=,)$|^(?=,))/g) || line.split(",");
+      const obj = { _id: i };
+      headers.forEach((h, idx) => { obj[h] = (vals[idx]||"").replace(/"/g,"").trim(); });
+      return obj;
+    });
+    return { headers, rows };
+  };
+
+  const handleFile = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const { headers, rows } = parseCSV(ev.target.result);
+      setCsvHeaders(headers);
+      setCsvRows(rows);
+      // Auto-detect common column names
+      const lh = headers.map(h=>h.toLowerCase());
+      setColName(headers[lh.findIndex(h=>h.includes("name")||h.includes("student"))] || "");
+      setColUni(headers[lh.findIndex(h=>h.includes("uni")||h.includes("college")||h.includes("instit"))] || "");
+      setColDate(headers[lh.findIndex(h=>h.includes("date")||h.includes("submitted"))] || "");
+      setColStatus(headers[lh.findIndex(h=>h.includes("status")||h.includes("confirm")||h.includes("result"))] || "");
+      setStep(2);
+      setVerdicts({});
+      setNotes({});
+    };
+    reader.readAsText(file);
+  };
+
+  // ── Match CSV rows against team reports ────────────────────────────────────
+  const buildMatches = () => {
+    if (!colName) return [];
+    // Flatten all uni_apps from all reports
+    const allAppEntries = [];
+    reports.forEach(r => {
+      (r.uni_apps||[]).forEach(u => {
+        if (u.university) {
+          for (let i = 0; i < (parseInt(u.count)||1); i++) {
+            allAppEntries.push({ report: r, university: u.university });
+          }
+        }
+      });
+    });
+
+    return csvRows.map(row => {
+      const csvStudentName = (row[colName]||"").toLowerCase().trim();
+      const csvUni         = colUni ? (row[colUni]||"").toLowerCase().trim() : "";
+      const csvDate        = colDate ? (row[colDate]||"").trim() : "";
+      const csvStatus      = colStatus ? (row[colStatus]||"").trim() : "";
+
+      // Find best matching report entry
+      // Match logic: university name contains match, and if date provided check within 7 days
+      let matched = null;
+      let matchScore = 0;
+      allAppEntries.forEach(entry => {
+        const entryUni = entry.university.toLowerCase();
+        let score = 0;
+        // University match (partial)
+        if (csvUni && (entryUni.includes(csvUni.slice(0,6)) || csvUni.includes(entryUni.slice(0,6)))) score += 3;
+        else if (!csvUni) score += 1; // no uni col — partial match
+        // Date proximity bonus
+        if (csvDate && entry.report.date) {
+          try {
+            const d1 = new Date(csvDate); const d2 = new Date(entry.report.date);
+            const diff = Math.abs(d1-d2)/(1000*60*60*24);
+            if (diff <= 3) score += 2;
+            else if (diff <= 7) score += 1;
+          } catch {}
+        }
+        if (score > matchScore) { matchScore = score; matched = entry; }
+      });
+
+      const isMatched = matchScore >= 2;
+      return {
+        _id: row._id,
+        csvName: row[colName] || "—",
+        csvUni: colUni ? (row[colUni]||"—") : "—",
+        csvDate: csvDate || "—",
+        csvStatus: csvStatus || "—",
+        rawRow: row,
+        matched: isMatched ? matched : null,
+        matchScore,
+      };
+    });
+  };
+
+  const matches = step === 3 ? buildMatches() : [];
+
+  // ── Summary stats ──────────────────────────────────────────────────────────
+  const confirmedCount = Object.values(verdicts).filter(v=>v==="confirmed").length;
+  const disputedCount  = Object.values(verdicts).filter(v=>v==="disputed").length;
+  const pendingCount   = matches.length - confirmedCount - disputedCount;
+  const autoMatchedCount = matches.filter(m=>m.matched).length;
+
+  // ── Per-agent crosscheck summary ───────────────────────────────────────────
+  const agentSummary = {};
+  matches.forEach(m => {
+    if (!m.matched) return;
+    const name = m.matched.report.agent_name;
+    if (!agentSummary[name]) agentSummary[name] = { total: 0, confirmed: 0, disputed: 0, pending: 0 };
+    agentSummary[name].total++;
+    const v = verdicts[m._id] || "pending";
+    agentSummary[name][v]++;
+  });
+
+  // ── Filtered matches ───────────────────────────────────────────────────────
+  const filteredMatches = matches.filter(m => {
+    if (filterAgent && (!m.matched || m.matched.report.agent_name !== filterAgent)) return false;
+    if (filterUni && !m.csvUni.toLowerCase().includes(filterUni.toLowerCase())) return false;
+    if (filterResult === "matched"   && !m.matched) return false;
+    if (filterResult === "unmatched" && m.matched)  return false;
+    if (filterResult === "confirmed" && (verdicts[m._id]||"pending") !== "confirmed") return false;
+    if (filterResult === "disputed"  && (verdicts[m._id]||"pending") !== "disputed")  return false;
+    return true;
+  });
+
+  const agentNames = [...new Set(reports.map(r=>r.agent_name))].sort();
+
+  // ── STEP 1: Upload ─────────────────────────────────────────────────────────
+  if (step === 1) return (
+    <div style={{ display:"flex", flexDirection:"column", gap:24 }}>
+      <div>
+        <div style={{ fontSize:20, fontWeight:900, color:C.text, marginBottom:4 }}>✅ Application Crosscheck</div>
+        <div style={{ color:C.muted, fontSize:13 }}>Upload the university admin CSV to cross-reference against your team's submitted applications and verify accuracy.</div>
+      </div>
+
+      {/* Upload box */}
+      <div
+        onClick={() => fileRef.current?.click()}
+        style={{ border:`2px dashed ${C.gold}55`, borderRadius:20, padding:"60px 40px", textAlign:"center", cursor:"pointer", background:C.goldSoft, transition:"all 0.2s" }}
+        onMouseEnter={e=>{ e.currentTarget.style.borderColor=C.gold; e.currentTarget.style.background="rgba(245,166,35,0.18)"; }}
+        onMouseLeave={e=>{ e.currentTarget.style.borderColor=C.gold+"55"; e.currentTarget.style.background=C.goldSoft; }}
+      >
+        <div style={{ fontSize:52, marginBottom:16 }}>📂</div>
+        <div style={{ color:C.text, fontWeight:800, fontSize:18, marginBottom:8 }}>Upload University Admin CSV</div>
+        <div style={{ color:C.muted, fontSize:13, marginBottom:20 }}>Drag & drop or click to browse · .csv files only</div>
+        <div style={{ background:C.gold, color:"#0A1020", borderRadius:10, padding:"11px 28px", fontSize:13, fontWeight:800, display:"inline-block" }}>Choose CSV File</div>
+        <input ref={fileRef} type="file" accept=".csv" onChange={handleFile} style={{ display:"none" }} />
+      </div>
+
+      {/* How it works */}
+      <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:22 }}>
+        <div style={{ color:C.teal, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:16 }}>How the Crosscheck Works</div>
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(4,1fr)", gap:14 }}>
+          {[
+            ["1️⃣","Upload CSV","Export from your university admin portal — any format with student names and university"],
+            ["2️⃣","Map Columns","Tell the system which column is the student name, which is university, and optionally date"],
+            ["3️⃣","Auto-Match","The system compares each CSV row against your team's daily reports and finds matches"],
+            ["4️⃣","Audit & Verify","Go through each application — mark as Confirmed ✓ or Disputed ✗ and add notes"],
+          ].map(([icon,title,desc])=>(
+            <div key={title} style={{ background:C.surface, borderRadius:12, padding:16 }}>
+              <div style={{ fontSize:24, marginBottom:8 }}>{icon}</div>
+              <div style={{ color:C.text, fontWeight:700, fontSize:13, marginBottom:4 }}>{title}</div>
+              <div style={{ color:C.muted, fontSize:12, lineHeight:1.6 }}>{desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* CSV format guide */}
+      <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:22 }}>
+        <div style={{ color:C.purple, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:12 }}>Expected CSV Format</div>
+        <div style={{ color:C.muted, fontSize:13, marginBottom:12 }}>Your CSV can have any columns — you'll map them in the next step. Example format:</div>
+        <div style={{ background:C.surface, borderRadius:10, padding:14, fontFamily:"monospace", fontSize:12, color:C.teal, overflowX:"auto" }}>
+          Student Name, University, Application Date, Status, Course<br/>
+          John Smith, Arden University, 11/03/2026, Submitted, MBA<br/>
+          Sarah Jones, BPP University, 11/03/2026, Under Review, Business<br/>
+          Ahmed Ali, ARU London, 10/03/2026, Confirmed, Law
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── STEP 2: Map columns ────────────────────────────────────────────────────
+  if (step === 2) return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+      <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+        <button onClick={()=>{ setStep(1); setCsvRows([]); setCsvHeaders([]); setFileName(""); }}
+          style={{ background:C.surface, border:`1px solid ${C.border}`, color:C.muted, borderRadius:9, padding:"8px 14px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>← Back</button>
+        <div>
+          <div style={{ fontSize:18, fontWeight:900, color:C.text }}>Map Your CSV Columns</div>
+          <div style={{ color:C.muted, fontSize:12, marginTop:2 }}>📎 {fileName} · {csvRows.length} rows detected</div>
+        </div>
+      </div>
+
+      <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:24 }}>
+        <div style={{ color:C.gold, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:18 }}>Match CSV Columns to Fields</div>
+        <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:16 }}>
+          {[
+            ["Student Name Column","colName",setColName,true,"Required — used to identify each student"],
+            ["University Column","colUni",setColUni,false,"Used to match against team's university submissions"],
+            ["Application Date Column","colDate",setColDate,false,"Optional — improves match accuracy"],
+            ["Status Column","colStatus",setColStatus,false,"Optional — shows admin confirmation status"],
+          ].map(([label,key,setter,req,hint])=>(
+            <div key={key}>
+              <div style={{ color:C.muted, fontSize:10, letterSpacing:1, textTransform:"uppercase", marginBottom:6 }}>
+                {label} {req && <span style={{ color:C.gold }}>*</span>}
+              </div>
+              <div style={{ color:C.faint, fontSize:11, marginBottom:8 }}>{hint}</div>
+              <select
+                value={key==="colName"?colName:key==="colUni"?colUni:key==="colDate"?colDate:colStatus}
+                onChange={e=>setter(e.target.value)}
+                style={iCss}
+              >
+                <option value="">— Not in my CSV —</option>
+                {csvHeaders.map(h=><option key={h} value={h}>{h}</option>)}
+              </select>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Preview */}
+      <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:22 }}>
+        <div style={{ color:C.teal, fontWeight:700, fontSize:12, letterSpacing:1, textTransform:"uppercase", marginBottom:14 }}>CSV Preview — First 5 Rows</div>
+        <div style={{ overflowX:"auto" }}>
+          <table style={{ width:"100%", borderCollapse:"collapse", minWidth:500 }}>
+            <thead>
+              <tr>{csvHeaders.map(h=>(
+                <th key={h} style={{ textAlign:"left", color:C.muted, fontSize:10, letterSpacing:0.8, textTransform:"uppercase", paddingBottom:10, borderBottom:`1px solid ${C.border}`, paddingRight:16, whiteSpace:"nowrap" }}>
+                  {h}
+                  {h===colName && <span style={{ color:C.gold, marginLeft:4 }}>★ Name</span>}
+                  {h===colUni  && <span style={{ color:C.green, marginLeft:4 }}>★ Uni</span>}
+                  {h===colDate && <span style={{ color:C.teal, marginLeft:4 }}>★ Date</span>}
+                  {h===colStatus && <span style={{ color:C.purple, marginLeft:4 }}>★ Status</span>}
+                </th>
+              ))}</tr>
+            </thead>
+            <tbody>
+              {csvRows.slice(0,5).map(row=>(
+                <tr key={row._id} style={{ borderBottom:`1px solid ${C.border}` }}>
+                  {csvHeaders.map(h=>(
+                    <td key={h} style={{ padding:"10px 16px 10px 0", color:C.text, fontSize:12 }}>{row[h]||"—"}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <button
+        onClick={()=>setStep(3)}
+        disabled={!colName}
+        style={{ background:colName?`linear-gradient(135deg,${C.gold},#D4600A)`:"#1a2a3a", color:colName?"#0A1020":C.muted, border:"none", borderRadius:12, padding:"14px 28px", fontSize:14, fontWeight:800, cursor:colName?"pointer":"not-allowed", fontFamily:"inherit", alignSelf:"flex-start" }}
+      >
+        Run Crosscheck → ({csvRows.length} applications)
+      </button>
+    </div>
+  );
+
+  // ── STEP 3: Review results ─────────────────────────────────────────────────
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:20 }}>
+
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          <button onClick={()=>setStep(2)} style={{ background:C.surface, border:`1px solid ${C.border}`, color:C.muted, borderRadius:9, padding:"8px 14px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>← Back</button>
+          <div>
+            <div style={{ fontSize:18, fontWeight:900, color:C.text }}>Crosscheck Results</div>
+            <div style={{ color:C.muted, fontSize:12, marginTop:2 }}>📎 {fileName} · {csvRows.length} rows</div>
+          </div>
+        </div>
+        <button onClick={()=>{ setStep(1); setCsvRows([]); setCsvHeaders([]); setFileName(""); setVerdicts({}); setNotes({}); }}
+          style={{ background:C.surface, border:`1px solid ${C.border}`, color:C.muted, borderRadius:9, padding:"8px 14px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>
+          Upload New CSV
+        </button>
+      </div>
+
+      {/* Summary stats */}
+      <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:12 }}>
+        {[
+          ["Total in CSV",     csvRows.length,       C.text,    "Applications from admin"],
+          ["Auto-Matched",     autoMatchedCount,     C.teal,    "Found in team reports"],
+          ["Unmatched",        csvRows.length-autoMatchedCount, C.red, "Not found — needs review"],
+          ["Confirmed ✓",      confirmedCount,       C.green,   "Auditor verified"],
+          ["Disputed ✗",       disputedCount,        C.gold,    "Flagged for investigation"],
+        ].map(([label,val,color,sub])=>(
+          <div key={label} style={{ background:C.card, border:`1px solid ${color}22`, borderRadius:14, padding:"16px 18px", position:"relative", overflow:"hidden" }}>
+            <div style={{ position:"absolute", top:0, left:0, right:0, height:3, background:color }} />
+            <div style={{ color:C.muted, fontSize:10, letterSpacing:1, textTransform:"uppercase", marginBottom:5 }}>{label}</div>
+            <div style={{ color, fontWeight:900, fontSize:28 }}>{val}</div>
+            <div style={{ color:C.muted, fontSize:11, marginTop:4 }}>{sub}</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Per-agent summary */}
+      {Object.keys(agentSummary).length > 0 && (
+        <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:20 }}>
+          <div style={{ color:C.text, fontWeight:700, fontSize:13, marginBottom:16 }}>Team Member Verification Summary</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:0 }}>
+            {Object.entries(agentSummary).sort((a,b)=>b[1].total-a[1].total).map(([name,s])=>(
+              <div key={name} style={{ display:"grid", gridTemplateColumns:"200px 80px 120px 120px 1fr", alignItems:"center", gap:12, padding:"12px 0", borderBottom:`1px solid ${C.border}` }}>
+                <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                  <Avatar name={name} size={28} />
+                  <span style={{ color:C.text, fontSize:13, fontWeight:600 }}>{name}</span>
+                </div>
+                <div style={{ color:C.teal, fontWeight:700, fontSize:13 }}>{s.total} apps</div>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ color:C.green, fontWeight:700, fontSize:12 }}>✓ {s.confirmed}</span>
+                  <span style={{ color:C.muted, fontSize:11 }}>confirmed</span>
+                </div>
+                <div style={{ display:"flex", alignItems:"center", gap:6 }}>
+                  <span style={{ color:C.gold, fontWeight:700, fontSize:12 }}>✗ {s.disputed}</span>
+                  <span style={{ color:C.muted, fontSize:11 }}>disputed</span>
+                </div>
+                <div style={{ height:6, background:C.faint, borderRadius:99, overflow:"hidden" }}>
+                  <div style={{ height:"100%", width:s.total>0?`${Math.round((s.confirmed/s.total)*100)}%`:"0%", background:C.green, borderRadius:99 }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Filters */}
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap", alignItems:"center" }}>
+        <span style={{ color:C.muted, fontSize:12 }}>Filter:</span>
+        <select value={filterAgent} onChange={e=>setFilterAgent(e.target.value)} style={{ ...iCss, width:"auto", fontSize:12, padding:"7px 12px" }}>
+          <option value="">All Team Members</option>
+          {agentNames.map(a=><option key={a}>{a}</option>)}
+        </select>
+        <select value={filterResult} onChange={e=>setFilterResult(e.target.value)} style={{ ...iCss, width:"auto", fontSize:12, padding:"7px 12px" }}>
+          <option value="">All Statuses</option>
+          <option value="matched">Auto-Matched</option>
+          <option value="unmatched">Unmatched</option>
+          <option value="confirmed">Confirmed</option>
+          <option value="disputed">Disputed</option>
+        </select>
+        <input placeholder="Filter by university…" value={filterUni} onChange={e=>setFilterUni(e.target.value)} style={{ ...iCss, width:200, fontSize:12, padding:"7px 12px" }} />
+        {(filterAgent||filterResult||filterUni) && (
+          <button onClick={()=>{ setFilterAgent(""); setFilterResult(""); setFilterUni(""); }}
+            style={{ background:C.redSoft, border:`1px solid ${C.red}33`, color:C.red, borderRadius:8, padding:"7px 12px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Clear</button>
+        )}
+        <span style={{ color:C.muted, fontSize:12, marginLeft:"auto" }}>{filteredMatches.length} showing</span>
+      </div>
+
+      {/* Application rows */}
+      <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+        {filteredMatches.map(m => {
+          const verdict = verdicts[m._id] || "pending";
+          const note    = notes[m._id]   || "";
+          const borderColor = verdict==="confirmed"?C.green:verdict==="disputed"?C.gold:m.matched?C.teal:C.red;
+
+          return (
+            <div key={m._id} style={{ background:C.card, border:`2px solid ${borderColor}33`, borderRadius:14, overflow:"hidden" }}>
+              {/* Main row */}
+              <div style={{ padding:"14px 18px", display:"grid", gridTemplateColumns:"1fr 1fr 1fr 1fr auto", gap:12, alignItems:"center" }}>
+
+                {/* Student info from CSV */}
+                <div>
+                  <div style={{ color:C.muted, fontSize:9, letterSpacing:0.8, textTransform:"uppercase", marginBottom:4 }}>Student (from CSV)</div>
+                  <div style={{ color:C.text, fontWeight:700, fontSize:14 }}>{m.csvName}</div>
+                  {m.csvDate !== "—" && <div style={{ color:C.muted, fontSize:11, marginTop:2 }}>📅 {m.csvDate}</div>}
+                  {m.csvStatus !== "—" && <div style={{ color:C.purple, fontSize:11, fontWeight:600, marginTop:2 }}>Status: {m.csvStatus}</div>}
+                </div>
+
+                {/* University from CSV */}
+                <div>
+                  <div style={{ color:C.muted, fontSize:9, letterSpacing:0.8, textTransform:"uppercase", marginBottom:4 }}>University (CSV)</div>
+                  <div style={{ color:m.matched?C.green:C.red, fontWeight:700, fontSize:13 }}>{m.csvUni}</div>
+                </div>
+
+                {/* Matched report */}
+                <div>
+                  <div style={{ color:C.muted, fontSize:9, letterSpacing:0.8, textTransform:"uppercase", marginBottom:4 }}>Matched to Report</div>
+                  {m.matched ? (
+                    <div>
+                      <div style={{ color:C.teal, fontWeight:700, fontSize:13 }}>{m.matched.report.agent_name}</div>
+                      <div style={{ color:C.muted, fontSize:11, marginTop:2 }}>{fmtDate(m.matched.report.date)} · {m.matched.university}</div>
+                    </div>
+                  ) : (
+                    <div style={{ color:C.red, fontSize:12, fontWeight:600 }}>⚠ No match found</div>
+                  )}
+                </div>
+
+                {/* Verdict buttons */}
+                <div style={{ display:"flex", gap:6 }}>
+                  <button
+                    onClick={()=>setVerdicts(p=>({ ...p, [m._id]: verdict==="confirmed"?"pending":"confirmed" }))}
+                    style={{ background:verdict==="confirmed"?C.green:C.greenSoft, border:`1px solid ${C.green}44`, color:verdict==="confirmed"?"#fff":C.green, borderRadius:8, padding:"6px 14px", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit", transition:"all 0.15s" }}
+                  >✓ Confirm</button>
+                  <button
+                    onClick={()=>setVerdicts(p=>({ ...p, [m._id]: verdict==="disputed"?"pending":"disputed" }))}
+                    style={{ background:verdict==="disputed"?C.gold:C.goldSoft, border:`1px solid ${C.gold}44`, color:verdict==="disputed"?"#0A1020":C.gold, borderRadius:8, padding:"6px 14px", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit", transition:"all 0.15s" }}
+                  >✗ Dispute</button>
+                </div>
+
+                {/* Status tag */}
+                <div>
+                  <Tag
+                    label={verdict==="confirmed"?"✓ Confirmed":verdict==="disputed"?"✗ Disputed":m.matched?"⏳ Pending":"❌ No Match"}
+                    color={verdict==="confirmed"?C.green:verdict==="disputed"?C.gold:m.matched?C.teal:C.red}
+                  />
+                </div>
+              </div>
+
+              {/* Auditor notes */}
+              <div style={{ borderTop:`1px solid ${C.border}`, padding:"10px 18px", display:"flex", gap:12, alignItems:"center" }}>
+                <span style={{ color:C.muted, fontSize:11, whiteSpace:"nowrap" }}>📝 Auditor note:</span>
+                <input
+                  value={note}
+                  onChange={e=>setNotes(p=>({ ...p, [m._id]: e.target.value }))}
+                  placeholder="Add investigation notes, discrepancies, or confirmation reference…"
+                  style={{ ...iCss, fontSize:12, padding:"7px 12px", flex:1 }}
+                />
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Export summary */}
+      {matches.length > 0 && (
+        <div style={{ background:C.card, border:`1px solid ${C.border}`, borderRadius:16, padding:20, display:"flex", alignItems:"center", justifyContent:"space-between" }}>
+          <div>
+            <div style={{ color:C.text, fontWeight:700, fontSize:14 }}>Export Audit Report</div>
+            <div style={{ color:C.muted, fontSize:12, marginTop:4 }}>Download a CSV of all crosscheck results with verdicts and notes</div>
+          </div>
+          <button
+            onClick={()=>{
+              const headers = ["Student Name","CSV University","Matched Agent","Report Date","Report University","Match Status","Verdict","Auditor Notes"];
+              const rows = matches.map(m=>[
+                m.csvName, m.csvUni,
+                m.matched?m.matched.report.agent_name:"No Match",
+                m.matched?fmtDate(m.matched.report.date):"—",
+                m.matched?m.matched.university:"—",
+                m.matched?"Matched":"Unmatched",
+                verdicts[m._id]||"pending",
+                (notes[m._id]||"").replace(/,/g,";"),
+              ]);
+              const csv = [headers,...rows].map(r=>r.join(",")).join("\n");
+              const a = document.createElement("a");
+              a.href = "data:text/csv;charset=utf-8,"+encodeURIComponent(csv);
+              a.download = `crosscheck_audit_${todayISO()}.csv`;
+              a.click();
+            }}
+            style={{ background:`linear-gradient(135deg,${C.gold},#D4600A)`, color:"#0A1020", border:"none", borderRadius:11, padding:"12px 24px", fontSize:13, fontWeight:800, cursor:"pointer", fontFamily:"inherit", whiteSpace:"nowrap" }}
+          >
+            ⬇ Export Audit CSV
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // ALL REPORTS — detailed manager view
 // ══════════════════════════════════════════════════════════════════════════════
 function AllReportsView({ reports }) {
@@ -1301,6 +1776,7 @@ export default function App() {
     { id: "entry", label: "Submit Daily Report", icon: "✍️" },
     ...(isManager ? [{ id: "log", label: "All Reports", icon: "📋" }] : []),
     ...(isManager ? [{ id: "audit", label: "Team Member Audit", icon: "🔍" }] : []),
+    ...(isManager ? [{ id: "crosscheck", label: "Application Crosscheck", icon: "✅" }] : []),
     { id: "myreports", label: "My Reports", icon: "👤" },
   ];
 
@@ -1435,6 +1911,8 @@ export default function App() {
         {tab === "log" && isManager && <AllReportsView reports={reports} />}
 
         {tab === "audit" && isManager && <AuditView reports={reports} profiles={profiles} />}
+
+        {tab === "crosscheck" && isManager && <CrosscheckView reports={reports} profiles={profiles} />}
       </div>
     </div>
   );
