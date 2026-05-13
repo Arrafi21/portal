@@ -1,160 +1,132 @@
 // api/sheets.js — Vercel Serverless Function
-// Handles all Google Sheets API calls server-side so credentials stay private
+// Single sheet "Arrafi_leads 2026" filtered by Councillor column
 
 const SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
-// ── Get JWT access token from service account ─────────────────────────────────
 async function getAccessToken() {
-  const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-  const now   = Math.floor(Date.now() / 1000);
-  const claim = {
-    iss: creds.client_email,
-    scope: "https://www.googleapis.com/auth/spreadsheets",
-    aud: "https://oauth2.googleapis.com/token",
-    exp: now + 3600,
-    iat: now,
-  };
-
-  // Build JWT — header.payload.signature
-  const b64 = (obj) => Buffer.from(JSON.stringify(obj)).toString("base64url");
-  const header  = b64({ alg: "RS256", typ: "JWT" });
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) throw new Error("GOOGLE_SERVICE_ACCOUNT_JSON env var is missing");
+  const creds = JSON.parse(raw);
+  const now = Math.floor(Date.now() / 1000);
+  const claim = { iss: creds.client_email, scope: "https://www.googleapis.com/auth/spreadsheets", aud: "https://oauth2.googleapis.com/token", exp: now + 3600, iat: now };
+  const b64 = obj => Buffer.from(JSON.stringify(obj)).toString("base64url");
+  const header = b64({ alg: "RS256", typ: "JWT" });
   const payload = b64(claim);
   const unsigned = `${header}.${payload}`;
-
-  // Sign with private key using Node crypto
   const { createSign } = await import("crypto");
   const sign = createSign("RSA-SHA256");
   sign.update(unsigned);
   const sig = sign.sign(creds.private_key, "base64url");
   const jwt = `${unsigned}.${sig}`;
-
-  // Exchange JWT for access token
   const res = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({
-      grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
-      assertion: jwt,
-    }),
+    method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: jwt }),
   });
   const data = await res.json();
-  if (!data.access_token) throw new Error("Failed to get access token: " + JSON.stringify(data));
+  if (!data.access_token) throw new Error("Token error: " + JSON.stringify(data));
   return data.access_token;
 }
 
-// ── Read a sheet tab ──────────────────────────────────────────────────────────
-async function readSheet(token, tabName, range = "A1:Z1000") {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tabName + "!" + range)}`;
-  const res  = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+async function readRange(token, sheetId, range) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
   const data = await res.json();
-  if (data.error) throw new Error(data.error.message);
+  if (data.error) throw new Error(`Sheets API: ${data.error.message}`);
   return data.values || [];
 }
 
-// ── Write to a sheet cell ─────────────────────────────────────────────────────
-async function writeCell(token, tabName, cellRange, value) {
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${encodeURIComponent(tabName + "!" + cellRange)}?valueInputOption=USER_ENTERED`;
-  const res  = await fetch(url, {
-    method: "PUT",
-    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+async function writeCell(token, sheetId, range, value) {
+  const url = `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(range)}?valueInputOption=USER_ENTERED`;
+  const res = await fetch(url, {
+    method: "PUT", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ values: [[value]] }),
   });
   return res.json();
 }
 
-// ── Parse rows into objects using header row ───────────────────────────────────
 function parseRows(values) {
-  if (!values || values.length < 2) return [];
-  const headers = values[0].map(h => (h||"").trim());
-  return values.slice(1).map((row, rowIdx) => {
-    const obj = { _rowIndex: rowIdx + 2 }; // 1-based, +1 for header
-    headers.forEach((h, i) => { obj[h] = (row[i] || "").trim(); });
+  if (!values || values.length < 2) return { headers: [], rows: [] };
+  const headers = values[0].map(h => (h || "").trim());
+  const rows = values.slice(1).map((row, i) => {
+    const obj = { _rowIndex: i + 2 };
+    headers.forEach((h, idx) => { obj[h] = (row[idx] || "").trim(); });
     return obj;
-  }).filter(r => Object.values(r).some(v => v && v !== "" ));
+  }).filter(r => Object.entries(r).filter(([k]) => k !== "_rowIndex").some(([, v]) => v !== ""));
+  return { headers, rows };
 }
 
-// ── Tab configs — columns per sheet ──────────────────────────────────────────
-// Team member tabs: Date, Status, Name, Phone, Email, Visa status, Course, Location, University, Comments, Call Day 2, Call Day 3
-// Phoenix Leads:   Date, Councillor, Name, Phone, Email, Course, Visa, Location, Status, Call Day 2, Call Day 3
-// XELM:            Contact, Phone, Email, Desired Course, Rafl Comments, Marketier Assigned, 2nd call, 3rd call, Comments
+const ALL_MEMBERS = ["Amir", "Kinza", "Mubarak", "Nourin", "Mahbuba", "Tanya"];
 
-const TEAM_TABS   = ["Amir", "Kinza", "Mubarak", "Nourin", "Mahbuba", "Tanya"];
-const SOURCE_TABS = ["Phoenix Leads", "XELM"];
-const ALL_TABS    = [...TEAM_TABS, ...SOURCE_TABS];
-
-// ── Main handler ──────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
 
   try {
-    const { action, tab, rowIndex, field, value } = req.method === "POST"
-      ? req.body
-      : req.query;
-
+    const params = req.method === "POST" ? req.body : req.query;
+    const { action, rowIndex, value } = params;
     const token = await getAccessToken();
 
-    // ── GET: read one tab ──────────────────────────────────────────────────
-    if (action === "getTab") {
-      if (!ALL_TABS.includes(tab)) {
-        return res.status(400).json({ error: `Unknown tab: ${tab}` });
-      }
-      const values = await readSheet(token, tab);
-      const rows   = parseRows(values);
-      return res.status(200).json({ tab, rows, total: rows.length });
-    }
-
-    // ── GET: read ALL team tabs at once ────────────────────────────────────
     if (action === "getAllTeamTabs") {
-      const results = {};
-      for (const t of TEAM_TABS) {
-        try {
-          const values   = await readSheet(token, t);
-          results[t]     = parseRows(values);
-        } catch (e) {
-          results[t] = [];
-        }
-      }
-      return res.status(200).json({ tabs: results });
+      const values = await readRange(token, SHEET_ID, "A:Z");
+      const { headers, rows } = parseRows(values);
+
+      // Find the column that holds the team member name
+      const assignedCol = headers.find(h =>
+        ["councillor","marketing office","marketier assigned","assigned","agent"].includes(h.toLowerCase())
+      ) || null;
+
+      // Group rows by team member
+      const grouped = {};
+      ALL_MEMBERS.forEach(m => { grouped[m] = []; });
+      grouped["Unassigned"] = [];
+
+      rows.forEach(row => {
+        const raw = assignedCol ? (row[assignedCol] || "") : "";
+        const match = ALL_MEMBERS.find(m => raw.toLowerCase().startsWith(m.toLowerCase()));
+        if (match) grouped[match].push(row);
+        else grouped["Unassigned"].push(row);
+      });
+
+      return res.status(200).json({ tabs: grouped, headers, total: rows.length });
     }
 
-    // ── GET: read source lead tabs ─────────────────────────────────────────
     if (action === "getSourceTabs") {
       const results = {};
-      for (const t of SOURCE_TABS) {
+      // Try XELM as a separate sheet if env var set
+      const xelmId = process.env.GOOGLE_XELM_SHEET_ID;
+      if (xelmId) {
         try {
-          const values = await readSheet(token, t);
-          results[t]   = parseRows(values);
-        } catch (e) {
-          results[t] = [];
-        }
+          const vals = await readRange(token, xelmId, "A:Z");
+          results["XELM"] = parseRows(vals).rows;
+        } catch { results["XELM"] = []; }
+      } else {
+        results["XELM"] = [];
       }
+      // Phoenix Leads tab
+      try {
+        const vals = await readRange(token, SHEET_ID, "Phoenix Leads!A:Z");
+        results["Phoenix Leads"] = parseRows(vals).rows;
+      } catch { results["Phoenix Leads"] = []; }
       return res.status(200).json({ tabs: results });
     }
 
-    // ── POST: update a cell (write outcome back) ───────────────────────────
     if (action === "updateCell" && req.method === "POST") {
-      if (!TEAM_TABS.includes(tab)) {
-        return res.status(400).json({ error: "Can only write to team tabs" });
-      }
-      // Find the column letter for the field
-      const values  = await readSheet(token, tab, "1:1");
-      const headers = (values[0] || []).map(h => (h||"").trim());
-      const colIdx  = headers.findIndex(h => h.toLowerCase() === (field||"").toLowerCase());
-      if (colIdx === -1) return res.status(400).json({ error: `Column "${field}" not found` });
-      const colLetter = String.fromCharCode(65 + colIdx);
-      const cellRange = `${colLetter}${rowIndex}`;
-      await writeCell(token, tab, cellRange, value);
-      return res.status(200).json({ ok: true, tab, cell: cellRange, value });
+      if (!rowIndex || !value) return res.status(400).json({ error: "rowIndex and value required" });
+      const headerRow = await readRange(token, SHEET_ID, "1:1");
+      const headers = (headerRow[0] || []).map(h => (h || "").trim());
+      const statusIdx = headers.findIndex(h => h.toLowerCase() === "status");
+      if (statusIdx === -1) return res.status(400).json({ error: "Status column not found" });
+      const col = String.fromCharCode(65 + statusIdx);
+      await writeCell(token, SHEET_ID, `${col}${rowIndex}`, value);
+      return res.status(200).json({ ok: true, cell: `${col}${rowIndex}`, value });
     }
 
-    return res.status(400).json({ error: "Unknown action" });
+    return res.status(400).json({ error: `Unknown action: ${action}` });
 
   } catch (err) {
-    console.error("Sheets API error:", err);
+    console.error("Sheets error:", err.message);
     return res.status(500).json({ error: err.message });
   }
 }
