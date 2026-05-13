@@ -634,6 +634,360 @@ function Dashboard({ reports, profiles }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// LEADS VIEW — live Google Sheets integration
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Status colour map matching the Google Sheet colour coding
+const STATUS_COLORS = {
+  "didn't pick up":          { bg:"#FFF9C4", color:"#F57F17", border:"#F9A825" },
+  "didnt pick up":           { bg:"#FFF9C4", color:"#F57F17", border:"#F9A825" },
+  "didn\'t pick up":        { bg:"#FFF9C4", color:"#F57F17", border:"#F9A825" },
+  "not interested":          { bg:"#FFEBEE", color:"#C62828", border:"#EF5350" },
+  "unreachable":             { bg:"#FF8A65", color:"#fff",    border:"#FF5722" },
+  "unreachable + no whatsapp":{ bg:"#FF8A65", color:"#fff",  border:"#FF5722" },
+  "went on voicemail":       { bg:"#E8F5E9", color:"#2E7D32", border:"#66BB6A" },
+  "voicemail":               { bg:"#E8F5E9", color:"#2E7D32", border:"#66BB6A" },
+  "need to call again":      { bg:"#E3F2FD", color:"#1565C0", border:"#42A5F5" },
+  "call back later":         { bg:"#E3F2FD", color:"#1565C0", border:"#42A5F5" },
+  "interested":              { bg:"#E8F5E9", color:"#1B5E20", border:"#43A047" },
+  "application submitted":   { bg:"#E8F5E9", color:"#1B5E20", border:"#2E7D32" },
+  "wrong number":            { bg:"#880000", color:"#fff",    border:"#880000" },
+  "hung up":                 { bg:"#FF8A65", color:"#fff",    border:"#FF5722" },
+  "whatsapp sms":            { bg:"#E3F2FD", color:"#1565C0", border:"#42A5F5" },
+  "no response":             { bg:"#F5F5F5", color:"#616161", border:"#BDBDBD" },
+  "not eligible":            { bg:"#FFEBEE", color:"#C62828", border:"#EF5350" },
+  "repeat lead":             { bg:"#F3E5F5", color:"#6A1B9A", border:"#AB47BC" },
+  "other issue":             { bg:"#FFF3E0", color:"#E65100", border:"#FFA726" },
+  "call failed":             { bg:"#FFEBEE", color:"#C62828", border:"#EF5350" },
+  "interested (will provide documents)": { bg:"#E8F5E9", color:"#1B5E20", border:"#2E7D32" },
+};
+
+function getStatusStyle(status) {
+  if (!status) return { bg: C.surface, color: C.muted, border: C.border };
+  const key = status.toLowerCase().trim();
+  return STATUS_COLORS[key] || { bg: C.surface, color: C.muted, border: C.border };
+}
+
+const TEAM_TABS   = ["Amir","Kinza","Mubarak","Nourin","Mahbuba","Tanya"];
+const SOURCE_TABS = ["Phoenix Leads","XELM"];
+const API_BASE    = "/api/sheets";
+
+async function fetchSheetTab(action, tab) {
+  const url = tab
+    ? `${API_BASE}?action=${action}&tab=${encodeURIComponent(tab)}`
+    : `${API_BASE}?action=${action}`;
+  const res  = await fetch(url);
+  if (!res.ok) throw new Error(`API error: ${res.status}`);
+  return res.json();
+}
+
+async function writeOutcome(tab, rowIndex, field, value) {
+  const res = await fetch(API_BASE, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action:"updateCell", tab, rowIndex, field, value }),
+  });
+  return res.json();
+}
+
+function LeadsView({ profile, isManager }) {
+  const [activeTab,    setActiveTab   ] = useState(isManager ? "ALL" : (profile?.full_name || TEAM_TABS[0]));
+  const [data,         setData        ] = useState({});   // { tabName: [rows] }
+  const [loading,      setLoading     ] = useState(false);
+  const [lastRefresh,  setLastRefresh ] = useState(null);
+  const [error,        setError       ] = useState("");
+  const [search,       setSearch      ] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
+  const [writing,      setWriting     ] = useState({});   // rowKey -> true while saving
+  const [writeMsg,     setWriteMsg    ] = useState({});   // rowKey -> "Saved!"
+
+  // ── Load data ───────────────────────────────────────────────────────────
+  const loadAll = async () => {
+    setLoading(true); setError("");
+    try {
+      // Load team tabs
+      const teamRes = await fetchSheetTab("getAllTeamTabs");
+      const srcRes  = await fetchSheetTab("getSourceTabs");
+      setData({ ...teamRes.tabs, ...srcRes.tabs });
+      setLastRefresh(new Date());
+    } catch (e) {
+      setError("Could not connect to Google Sheets: " + e.message);
+    }
+    setLoading(false);
+  };
+
+  useEffect(() => { loadAll(); }, []);
+
+  // ── Write outcome back to sheet ─────────────────────────────────────────
+  const handleWriteStatus = async (tab, row, newStatus) => {
+    const key = `${tab}-${row._rowIndex}`;
+    setWriting(p => ({ ...p, [key]: true }));
+    try {
+      // Find the status column name for this tab
+      const statusCol = SOURCE_TABS.includes(tab) ? "Status" :
+        Object.keys(row).find(k => k.toLowerCase() === "status") || "Status";
+      await writeOutcome(tab, row._rowIndex, statusCol, newStatus);
+      // Update local state
+      setData(prev => ({
+        ...prev,
+        [tab]: prev[tab].map(r => r._rowIndex === row._rowIndex ? { ...r, [statusCol]: newStatus } : r)
+      }));
+      setWriteMsg(p => ({ ...p, [key]: "✓ Saved" }));
+      setTimeout(() => setWriteMsg(p => ({ ...p, [key]: "" })), 2500);
+    } catch (e) {
+      setWriteMsg(p => ({ ...p, [key]: "✗ Failed" }));
+    }
+    setWriting(p => ({ ...p, [key]: false }));
+  };
+
+  // ── Determine which tabs to show ────────────────────────────────────────
+  const visibleTabs = isManager
+    ? ["ALL", ...TEAM_TABS, ...SOURCE_TABS]
+    : [profile?.full_name].filter(t => TEAM_TABS.includes(t));
+
+  // ── Get rows for current view ───────────────────────────────────────────
+  const getRows = () => {
+    let rows = [];
+    if (activeTab === "ALL") {
+      TEAM_TABS.forEach(t => {
+        (data[t] || []).forEach(r => rows.push({ ...r, _tab: t }));
+      });
+    } else {
+      rows = (data[activeTab] || []).map(r => ({ ...r, _tab: activeTab }));
+    }
+
+    // Apply search
+    if (search) {
+      const q = search.toLowerCase();
+      rows = rows.filter(r =>
+        (r.Name||r.Contact||"").toLowerCase().includes(q) ||
+        (r.Phone||"").includes(q) ||
+        (r.Email||"").toLowerCase().includes(q) ||
+        (r.Course||r["Desired Course"]||"").toLowerCase().includes(q)
+      );
+    }
+
+    // Apply status filter
+    if (statusFilter) {
+      rows = rows.filter(r =>
+        (r.Status||"").toLowerCase().includes(statusFilter.toLowerCase())
+      );
+    }
+
+    return rows;
+  };
+
+  const rows = getRows();
+
+  // ── Status counts for current view ──────────────────────────────────────
+  const statusCounts = {};
+  rows.forEach(r => {
+    const s = r.Status || "No Status";
+    statusCounts[s] = (statusCounts[s]||0) + 1;
+  });
+  const topStatuses = Object.entries(statusCounts).sort((a,b)=>b[1]-a[1]).slice(0,6);
+
+  // ── Get all unique statuses for filter dropdown ──────────────────────────
+  const allStatuses = [...new Set(
+    Object.values(data).flat().map(r => r.Status||"").filter(Boolean)
+  )].sort();
+
+  // ── Helper: get the name/identifier for a row ────────────────────────────
+  const rowName   = r => r.Name || r.Contact || "—";
+  const rowPhone  = r => r.Phone || "—";
+  const rowEmail  = r => r.Email || "—";
+  const rowCourse = r => r.Course || r["Desired Course"] || "—";
+  const rowVisa   = r => r["Visa status"] || r["Visa Status"] || r.Visa || "—";
+  const rowLoc    = r => r.Location || "—";
+  const rowUni    = r => r.University || "—";
+  const rowStatus = r => r.Status || "";
+  const rowComments = r => r.Comments || r["Rafl Comments"] || "";
+  const rowDate   = r => r.Date || "";
+  const rowCall2  = r => r["Call Day 2"] || r["2nd call"] || "";
+  const rowCall3  = r => r["Call Day 3"] || r["3rd call"] || "";
+  const rowAssigned = r => r.Councillor || r["Marketier Assigned"] || r._tab || "";
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", gap:18 }}>
+
+      {/* Header */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", gap:12 }}>
+        <div>
+          <div style={{ fontSize:20, fontWeight:900, color:C.text }}>📋 Live Leads
+            <span style={{ color:C.muted, fontWeight:400, fontSize:13, marginLeft:10 }}>{rows.length} leads shown</span>
+          </div>
+          <div style={{ color:C.muted, fontSize:12, marginTop:2 }}>
+            {lastRefresh ? `Last refreshed ${lastRefresh.toLocaleTimeString("en-GB",{hour:"2-digit",minute:"2-digit"})}` : "Loading…"}
+          </div>
+        </div>
+        <button onClick={loadAll} disabled={loading}
+          style={{ background:loading?C.surface:`linear-gradient(135deg,${C.teal},#008B87)`, color:loading?C.muted:"#0A1020", border:"none", borderRadius:10, padding:"10px 20px", fontSize:13, fontWeight:800, cursor:loading?"not-allowed":"pointer", fontFamily:"inherit" }}>
+          {loading ? "⏳ Loading…" : "⟳ Refresh Leads"}
+        </button>
+      </div>
+
+      {error && (
+        <div style={{ background:C.redSoft, border:`1px solid ${C.red}44`, borderRadius:12, padding:"14px 18px", color:C.red, fontSize:13 }}>
+          ⚠ {error}
+          <div style={{ fontSize:11, marginTop:6, color:C.muted }}>Make sure you've shared the sheet with: smartmove-sheets@smartmove-portal-495616.iam.gserviceaccount.com and added GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_SHEET_ID to Vercel environment variables.</div>
+        </div>
+      )}
+
+      {/* Status summary pills */}
+      {topStatuses.length > 0 && (
+        <div style={{ display:"flex", flexWrap:"wrap", gap:8 }}>
+          <button onClick={()=>setStatusFilter("")}
+            style={{ background:!statusFilter?C.goldSoft:C.surface, border:`1px solid ${!statusFilter?C.gold:C.border}`, color:!statusFilter?C.gold:C.muted, borderRadius:99, padding:"5px 14px", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>
+            All ({rows.length})
+          </button>
+          {topStatuses.map(([s,n]) => {
+            const st = getStatusStyle(s);
+            const active = statusFilter === s;
+            return (
+              <button key={s} onClick={()=>setStatusFilter(active?"":s)}
+                style={{ background:active?st.color:st.bg, border:`1px solid ${st.border}`, color:active?"#fff":st.color, borderRadius:99, padding:"5px 14px", fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit" }}>
+                {s} ({n})
+              </button>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Tab selector */}
+      <div style={{ display:"flex", gap:0, background:C.surface, borderRadius:12, padding:4, flexWrap:"wrap", border:`1px solid ${C.border}` }}>
+        {visibleTabs.map(t => (
+          <button key={t} onClick={()=>{ setActiveTab(t); setSearch(""); setStatusFilter(""); }}
+            style={{ background:activeTab===t?C.card:"transparent", border:`1px solid ${activeTab===t?C.gold+"44":"transparent"}`, color:activeTab===t?C.gold:C.muted, borderRadius:9, padding:"7px 16px", fontSize:12, fontWeight:activeTab===t?800:500, cursor:"pointer", fontFamily:"inherit", transition:"all 0.15s", whiteSpace:"nowrap" }}>
+            {t === "ALL" ? "🌐 All Team" : SOURCE_TABS.includes(t) ? `📥 ${t}` : `👤 ${t}`}
+            {t !== "ALL" && data[t] && <span style={{ color:C.faint, fontSize:10, marginLeft:5 }}>({(data[t]||[]).length})</span>}
+          </button>
+        ))}
+      </div>
+
+      {/* Search + filter */}
+      <div style={{ display:"flex", gap:10, flexWrap:"wrap" }}>
+        <input
+          value={search} onChange={e=>setSearch(e.target.value)}
+          placeholder="🔍  Search by name, phone, email, course…"
+          style={{ ...iCss, flex:1, minWidth:220, fontSize:13 }}
+        />
+        <select value={statusFilter} onChange={e=>setStatusFilter(e.target.value)}
+          style={{ ...iCss, width:"auto", fontSize:12, padding:"7px 12px" }}>
+          <option value="">All Statuses</option>
+          {allStatuses.map(s=><option key={s}>{s}</option>)}
+        </select>
+        {(search||statusFilter) && (
+          <button onClick={()=>{ setSearch(""); setStatusFilter(""); }}
+            style={{ background:C.redSoft, border:`1px solid ${C.red}33`, color:C.red, borderRadius:8, padding:"7px 12px", fontSize:12, cursor:"pointer", fontFamily:"inherit" }}>Clear</button>
+        )}
+      </div>
+
+      {/* Loading skeleton */}
+      {loading && (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {[1,2,3,4,5].map(i=>(
+            <div key={i} style={{ background:C.card, borderRadius:12, padding:16, height:64, opacity:0.5, animation:"pulse 1.5s ease-in-out infinite" }} />
+          ))}
+        </div>
+      )}
+
+      {/* Lead rows */}
+      {!loading && rows.length === 0 && (
+        <div style={{ textAlign:"center", color:C.muted, padding:"60px 20px" }}>
+          <div style={{ fontSize:40, marginBottom:12 }}>📭</div>
+          <div style={{ fontSize:16, fontWeight:700, color:C.text, marginBottom:6 }}>No leads found</div>
+          <div style={{ fontSize:13 }}>{error ? "Check the error above." : "Try refreshing or changing your filter."}</div>
+        </div>
+      )}
+
+      {!loading && rows.length > 0 && (
+        <div style={{ display:"flex", flexDirection:"column", gap:8 }}>
+          {rows.map((r, idx) => {
+            const status   = rowStatus(r);
+            const st       = getStatusStyle(status);
+            const tabName  = r._tab;
+            const key      = `${tabName}-${r._rowIndex}`;
+            const isWriting= writing[key];
+            const wMsg     = writeMsg[key];
+
+            return (
+              <div key={key}
+                style={{ background:C.card, border:`2px solid ${st.border}33`, borderRadius:14, overflow:"hidden" }}>
+
+                {/* Main row */}
+                <div style={{ padding:"12px 16px", display:"grid", gridTemplateColumns:"200px 140px 1fr 160px 140px auto", gap:10, alignItems:"center" }}>
+
+                  {/* Name + contact */}
+                  <div>
+                    <div style={{ color:C.text, fontWeight:700, fontSize:14 }}>{rowName(r)}</div>
+                    <div style={{ color:C.teal, fontSize:11, marginTop:2, fontFamily:"monospace" }}>{rowPhone(r)}</div>
+                    {rowEmail(r) !== "—" && <div style={{ color:C.muted, fontSize:10, marginTop:1, wordBreak:"break-all" }}>{rowEmail(r)}</div>}
+                  </div>
+
+                  {/* Course + visa */}
+                  <div>
+                    <div style={{ color:C.gold, fontSize:12, fontWeight:600 }}>{rowCourse(r)}</div>
+                    <div style={{ color:C.muted, fontSize:11, marginTop:2 }}>{rowVisa(r)}</div>
+                    <div style={{ color:C.muted, fontSize:11 }}>{rowLoc(r)}</div>
+                  </div>
+
+                  {/* Comments */}
+                  <div>
+                    {rowComments(r) && (
+                      <div style={{ color:C.muted, fontSize:12, lineHeight:1.5, background:C.surface, borderRadius:8, padding:"6px 10px" }}>
+                        {rowComments(r).slice(0,120)}{rowComments(r).length>120?"…":""}
+                      </div>
+                    )}
+                    {rowCall2(r) && <div style={{ color:C.blue, fontSize:11, marginTop:4 }}>📞 Day 2: {rowCall2(r).slice(0,60)}</div>}
+                    {rowCall3(r) && <div style={{ color:C.purple, fontSize:11, marginTop:2 }}>📞 Day 3: {rowCall3(r).slice(0,60)}</div>}
+                  </div>
+
+                  {/* Assigned + date */}
+                  <div>
+                    {activeTab === "ALL" || SOURCE_TABS.includes(activeTab) ? (
+                      <div style={{ color:avatarClr(rowAssigned(r)||"?"), fontWeight:700, fontSize:12, background:avatarClr(rowAssigned(r)||"?")+"22", borderRadius:7, padding:"4px 10px", display:"inline-block" }}>
+                        {rowAssigned(r)||tabName}
+                      </div>
+                    ) : null}
+                    {rowDate(r) && <div style={{ color:C.muted, fontSize:11, marginTop:4 }}>📅 {rowDate(r)}</div>}
+                    {rowUni(r) !== "—" && <div style={{ color:C.green, fontSize:11, marginTop:2 }}>🎓 {rowUni(r)}</div>}
+                  </div>
+
+                  {/* Status badge */}
+                  <div>
+                    <div style={{ background:st.bg, color:st.color, border:`1px solid ${st.border}`, borderRadius:8, padding:"5px 10px", fontSize:11, fontWeight:700, textAlign:"center" }}>
+                      {status || "No Status"}
+                    </div>
+                    {wMsg && <div style={{ color:wMsg.includes("✓")?C.green:C.red, fontSize:11, fontWeight:700, marginTop:4, textAlign:"center" }}>{wMsg}</div>}
+                  </div>
+
+                  {/* Quick status update (team tabs only) */}
+                  {(TEAM_TABS.includes(tabName)) && (
+                    <div>
+                      <select
+                        value={status}
+                        disabled={isWriting}
+                        onChange={e=>handleWriteStatus(tabName, r, e.target.value)}
+                        style={{ ...iCss, width:150, fontSize:11, padding:"6px 8px", opacity:isWriting?0.5:1 }}
+                      >
+                        <option value="">Update status…</option>
+                        {["Didn\'t Pick Up","Went on voicemail","Not Interested","Unreachable","Unreachable + No Whatsapp","Need to call Again","Call back later","Interested","Application Submitted","Wrong Number","Hung up","Whatsapp SMS","No Response","Not Eligible","Repeat Lead","Other Issue - Comments"].map(s=>(
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // AUDIT VIEW — full individual team member performance report
 // ══════════════════════════════════════════════════════════════════════════════
 function AuditView({ reports, profiles }) {
@@ -1774,7 +2128,8 @@ export default function App() {
   const TABS = [
     ...(isManager ? [{ id: "dashboard", label: "KPI Dashboard", icon: "📊" }] : []),
     { id: "entry", label: "Submit Daily Report", icon: "✍️" },
-    ...(isManager ? [{ id: "log", label: "All Reports", icon: "📋" }] : []),
+    { id: "leads", label: "Leads", icon: "📋" },
+    ...(isManager ? [{ id: "log", label: "All Reports", icon: "📊" }] : []),
     ...(isManager ? [{ id: "audit", label: "Team Member Audit", icon: "🔍" }] : []),
     ...(isManager ? [{ id: "crosscheck", label: "Application Crosscheck", icon: "✅" }] : []),
     { id: "myreports", label: "My Reports", icon: "👤" },
@@ -1913,6 +2268,8 @@ export default function App() {
         {tab === "audit" && isManager && <AuditView reports={reports} profiles={profiles} />}
 
         {tab === "crosscheck" && isManager && <CrosscheckView reports={reports} profiles={profiles} />}
+
+        {tab === "leads" && <LeadsView profile={profile} isManager={isManager} />}
       </div>
     </div>
   );
