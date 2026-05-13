@@ -670,24 +670,41 @@ function getStatusStyle(status) {
 
 const TEAM_TABS   = ["Amir","Kinza","Mubarak","Nourin","Mahbuba","Tanya"];
 const SOURCE_TABS = ["Phoenix Leads","XELM"];
-const API_BASE    = "/api/sheets";
 
-async function fetchSheetTab(action, tab) {
-  const url = tab
-    ? `${API_BASE}?action=${action}&tab=${encodeURIComponent(tab)}`
-    : `${API_BASE}?action=${action}`;
+
+// Fetch Google Sheet directly as CSV from browser (sheet must be "Anyone with link")
+const SHEET_ID_MAIN = "185jtGeHdyihieh2cDqYby8pPrrVN7edsw9t4i7kn6ts";
+const SHEET_ID_XELM = "1C1ElshfhSbodvgWqSBIbPXP8lxlfyLSMONp0cMo3k0M";
+
+async function fetchCSV(sheetId, gid = "0") {
+  const url = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv&gid=${gid}`;
   const res  = await fetch(url);
-  if (!res.ok) throw new Error(`API error: ${res.status}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Failed to fetch sheet (${res.status})`);
+  const text = await res.text();
+  return parseCSV(text);
 }
 
-async function writeOutcome(tab, rowIndex, field, value) {
-  const res = await fetch(API_BASE, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ action:"updateCell", tab, rowIndex, field, value }),
-  });
-  return res.json();
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/);
+  if (lines.length < 2) return { headers: [], rows: [] };
+  const splitLine = (line) => {
+    const result = []; let cur = ""; let inQ = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (c === '"') { if (inQ && line[i+1]==='"') { cur+='"'; i++; } else inQ=!inQ; }
+      else if (c==="," && !inQ) { result.push(cur.trim()); cur=""; }
+      else cur+=c;
+    }
+    result.push(cur.trim()); return result;
+  };
+  const headers = splitLine(lines[0]);
+  const rows = lines.slice(1).map((line,i) => {
+    const vals = splitLine(line);
+    const obj  = { _rowIndex: i+2 };
+    headers.forEach((h,idx) => { obj[h] = (vals[idx]||"").trim(); });
+    return obj;
+  }).filter(r => Object.entries(r).filter(([k])=>k!=="$_rowIndex").some(([,v])=>v!==""));
+  return { headers, rows };
 }
 
 function LeadsView({ profile, isManager }) {
@@ -705,13 +722,40 @@ function LeadsView({ profile, isManager }) {
   const loadAll = async () => {
     setLoading(true); setError("");
     try {
-      // Load team tabs
-      const teamRes = await fetchSheetTab("getAllTeamTabs");
-      const srcRes  = await fetchSheetTab("getSourceTabs");
-      setData({ ...teamRes.tabs, ...srcRes.tabs });
+      // Fetch main sheet CSV directly from browser
+      const { headers, rows } = await fetchCSV(SHEET_ID_MAIN, "0");
+
+      // Find assigned column
+      const assignedCol = headers.find(h =>
+        ["councillor","marketing office","marketier assigned","assigned","agent"]
+          .includes(h.toLowerCase().trim())
+      ) || null;
+
+      // Group by team member
+      const grouped = {};
+      ALL_MEMBERS.forEach(m => { grouped[m] = []; });
+      grouped["Unassigned"] = [];
+      rows.forEach(row => {
+        const raw   = assignedCol ? (row[assignedCol] || "") : "";
+        const match = ALL_MEMBERS.find(m =>
+          raw.trim().toLowerCase() === m.toLowerCase() ||
+          raw.trim().toLowerCase().startsWith(m.toLowerCase())
+        );
+        if (match) grouped[match].push(row);
+        else       grouped["Unassigned"].push(row);
+      });
+
+      // Fetch XELM sheet
+      let xelmRows = [];
+      try {
+        const xr = await fetchCSV(SHEET_ID_XELM, "0");
+        xelmRows = xr.rows;
+      } catch(e) { /* XELM not available */ }
+
+      setData({ ...grouped, "XELM": xelmRows, "Phoenix Leads": [] });
       setLastRefresh(new Date());
     } catch (e) {
-      setError("Could not connect to Google Sheets: " + e.message);
+      setError("Could not load leads: " + e.message + " — Make sure the sheet is shared as Anyone with the link.");
     }
     setLoading(false);
   };
@@ -722,21 +766,14 @@ function LeadsView({ profile, isManager }) {
   const handleWriteStatus = async (tab, row, newStatus) => {
     const key = `${tab}-${row._rowIndex}`;
     setWriting(p => ({ ...p, [key]: true }));
-    try {
-      // Find the status column name for this tab
-      const statusCol = SOURCE_TABS.includes(tab) ? "Status" :
-        Object.keys(row).find(k => k.toLowerCase() === "status") || "Status";
-      await writeOutcome(tab, row._rowIndex, statusCol, newStatus);
-      // Update local state
-      setData(prev => ({
-        ...prev,
-        [tab]: prev[tab].map(r => r._rowIndex === row._rowIndex ? { ...r, [statusCol]: newStatus } : r)
-      }));
-      setWriteMsg(p => ({ ...p, [key]: "✓ Saved" }));
-      setTimeout(() => setWriteMsg(p => ({ ...p, [key]: "" })), 2500);
-    } catch (e) {
-      setWriteMsg(p => ({ ...p, [key]: "✗ Failed" }));
-    }
+    // Update local state immediately
+    const statusCol = Object.keys(row).find(k => k.toLowerCase() === "status") || "Status";
+    setData(prev => ({
+      ...prev,
+      [tab]: (prev[tab]||[]).map(r => r._rowIndex === row._rowIndex ? { ...r, [statusCol]: newStatus } : r)
+    }));
+    setWriteMsg(p => ({ ...p, [key]: "✓ Updated" }));
+    setTimeout(() => setWriteMsg(p => ({ ...p, [key]: "" })), 2500);
     setWriting(p => ({ ...p, [key]: false }));
   };
 
