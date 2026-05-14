@@ -1,6 +1,22 @@
+import https from "https";
+
 const SHEET_ID = "185jtGeHdyihieh2cDqYby8pPrrVN7edsw9t4i7kn6ts";
 const XELM_ID  = "1C1ElshfhSbodvgWqSBIbPXP8lxlfyLSMONp0cMo3k0M";
 const ALL_MEMBERS = ["Amir","Kinza","Mubarak","Nourin","Mahbuba","Tanya"];
+
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        return httpsGet(res.headers.location).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      let data = "";
+      res.on("data", chunk => data += chunk);
+      res.on("end", () => resolve(data));
+    }).on("error", reject);
+  });
+}
 
 function parseCSV(text) {
   const lines = text.trim().split(/\r?\n/);
@@ -35,13 +51,14 @@ export default async function handler(req, res) {
   try {
     if (action === "getAllTeamTabs") {
       const url = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/export?format=csv&gid=0`;
-      const response = await fetch(url);
-      if (!response.ok) throw new Error(`Sheet fetch failed: ${response.status}`);
-      const { headers, rows } = parseCSV(await response.text());
+      const text = await httpsGet(url);
+      const { headers, rows } = parseCSV(text);
+
       const assignedCol = headers.find(h =>
         ["councillor","marketing office","marketier assigned","assigned","agent"]
           .includes(h.toLowerCase().trim())
       ) || null;
+
       const grouped = {};
       ALL_MEMBERS.forEach(m => { grouped[m] = []; });
       grouped["Unassigned"] = [];
@@ -54,17 +71,17 @@ export default async function handler(req, res) {
         if (match) grouped[match].push(row);
         else grouped["Unassigned"].push(row);
       });
+
       return res.status(200).json({ tabs: grouped, headers, total: rows.length });
     }
 
     if (action === "getSourceTabs") {
-      const results = {};
+      const results = { "Phoenix Leads": [] };
       try {
         const url = `https://docs.google.com/spreadsheets/d/${XELM_ID}/export?format=csv&gid=0`;
-        const r = await fetch(url);
-        results["XELM"] = r.ok ? parseCSV(await r.text()).rows : [];
+        const text = await httpsGet(url);
+        results["XELM"] = parseCSV(text).rows;
       } catch(e) { results["XELM"] = []; }
-      results["Phoenix Leads"] = [];
       return res.status(200).json({ tabs: results });
     }
 
